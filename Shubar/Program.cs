@@ -17,15 +17,21 @@ namespace Shubar
         public static readonly int ConcurrentReadsFromPeerPort = 1000 * Environment.ProcessorCount;
 
         private static Socket _clientSocket;
-        private static Socket _peerSocket;
 
         private static void DisableUdpConnectionReset(Socket socket)
         {
             if (Helpers.Environment.IsNonMicrosoftOperatingSystem())
                 return; // This stuff only works on Windows.
 
-            const int code = unchecked((int)(0x80000000|0x18000000|12));
+            const int code = unchecked((int)(0x80000000 | 0x18000000 | 12));
             socket.IOControl(code, BitConverter.GetBytes(false), new byte[sizeof(bool)]);
+        }
+
+        private static void EnableSocketSharingPerCore(Socket socket, ushort cpuIndex)
+        {
+            // SIO_SET_PORT_SHARING_PER_PROC_SOCKET
+            const int code = unchecked((int)(0x80000000 | 0x18000000 | 21));
+            socket.IOControl(code, BitConverter.GetBytes(cpuIndex), new byte[sizeof(ushort)]);
         }
 
         static void Main(string[] args)
@@ -49,11 +55,7 @@ namespace Shubar
             _clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             _clientSocket.Bind(new IPEndPoint(IPAddress.Any, 3478));
 
-            _peerSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            _peerSocket.Bind(new IPEndPoint(IPAddress.Any, 3479));
-
             DisableUdpConnectionReset(_clientSocket);
-            DisableUdpConnectionReset(_peerSocket);
 
             for (var i = 0; i < ConcurrentReadsFromClientPort; i++)
             {
@@ -76,6 +78,25 @@ namespace Shubar
                 }).Forget();
             }
 
+            if (Helpers.Environment.IsMicrosoftOperatingSystem() && Environment.OSVersion.Version.Build == 19041)
+            {
+                StartMultiSocketPeerReads();
+            }
+            else
+            {
+                StartSingleSocketPeerReads();
+            }
+
+            Thread.Sleep(Timeout.Infinite);
+        }
+
+        private static void StartSingleSocketPeerReads()
+        {
+            var peerSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            peerSocket.Bind(new IPEndPoint(IPAddress.Any, 3479));
+
+            DisableUdpConnectionReset(peerSocket);
+
             for (var i = 0; i < ConcurrentReadsFromPeerPort; i++)
             {
                 var buffer = new byte[MaxPacketSizeBytes];
@@ -85,7 +106,7 @@ namespace Shubar
                 {
                     while (true)
                     {
-                        var result = await _peerSocket.ReceiveFromAsync(buffer, SocketFlags.None, receivedFrom);
+                        var result = await peerSocket.ReceiveFromAsync(buffer, SocketFlags.None, receivedFrom);
 
                         if (result.ReceivedBytes == 0)
                             continue;
@@ -96,8 +117,41 @@ namespace Shubar
                     }
                 }).Forget();
             }
+        }
 
-            Thread.Sleep(Timeout.Infinite);
+        // Windows 2004+ only
+        private static void StartMultiSocketPeerReads()
+        {
+            for (ushort cpu = 0; cpu < Environment.ProcessorCount; cpu++)
+            {
+                var peerSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+
+                DisableUdpConnectionReset(peerSocket);
+                EnableSocketSharingPerCore(peerSocket, cpu);
+
+                peerSocket.Bind(new IPEndPoint(IPAddress.Any, 3479));
+
+                for (var i = 0; i < ConcurrentReadsFromPeerPort; i++)
+                {
+                    var buffer = new byte[MaxPacketSizeBytes];
+                    var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
+
+                    Task.Run(async delegate
+                    {
+                        while (true)
+                        {
+                            var result = await peerSocket.ReceiveFromAsync(buffer, SocketFlags.None, receivedFrom);
+
+                            if (result.ReceivedBytes == 0)
+                                continue;
+
+                            PacketsReadFromPeerPort.Inc();
+
+                            await ProcessPacketOnPeerPortAsync(new ArraySegment<byte>(buffer, 0, result.ReceivedBytes));
+                        }
+                    }).Forget();
+                }
+            }
         }
 
         private static ConcurrentDictionary<long, Session> _sessions = new ConcurrentDictionary<long, Session>();
