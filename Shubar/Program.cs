@@ -14,7 +14,7 @@ namespace Shubar
     {
         public const int MaxPacketSizeBytes = 2000;
         public const int ConcurrentReadsFromClientPort = 1000;
-        public const int ConcurrentReadsFromPeerPort = 1000;
+        public static readonly int ConcurrentReadsFromPeerPort = 1000 * Environment.ProcessorCount;
 
         private static Socket _clientSocket;
         private static Socket _peerSocket;
