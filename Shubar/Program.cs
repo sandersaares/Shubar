@@ -14,7 +14,8 @@ namespace Shubar
     {
         public const int MaxPacketSizeBytes = 2000;
         public const int ConcurrentReadsFromClientPort = 1000;
-        public static readonly int ConcurrentReadsFromPeerPort = 1000 * Environment.ProcessorCount;
+        public static readonly int ConcurrentReadsFromPeerPortPerCpu = 1000;
+        public static readonly int ConcurrentReadsFromPeerPortTotal = ConcurrentReadsFromPeerPortPerCpu * Environment.ProcessorCount;
 
         private static Socket _clientSocket;
 
@@ -97,7 +98,7 @@ namespace Shubar
 
             DisableUdpConnectionReset(peerSocket);
 
-            for (var i = 0; i < ConcurrentReadsFromPeerPort; i++)
+            for (var i = 0; i < ConcurrentReadsFromPeerPortTotal; i++)
             {
                 var buffer = new byte[MaxPacketSizeBytes];
                 var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
@@ -131,7 +132,7 @@ namespace Shubar
 
                 peerSocket.Bind(new IPEndPoint(IPAddress.Any, 3479));
 
-                for (var i = 0; i < ConcurrentReadsFromPeerPort; i++)
+                for (var i = 0; i < ConcurrentReadsFromPeerPortPerCpu; i++)
                 {
                     var buffer = new byte[MaxPacketSizeBytes];
                     var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
