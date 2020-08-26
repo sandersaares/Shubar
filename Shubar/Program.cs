@@ -21,6 +21,9 @@ namespace Shubar
 
         private static void DisableUdpConnectionReset(Socket socket)
         {
+            if (Helpers.Environment.IsNonMicrosoftOperatingSystem())
+                return; // This stuff only works on Windows.
+
             const int code = unchecked((int)(0x80000000|0x18000000|12));
             socket.IOControl(code, BitConverter.GetBytes(false), new byte[sizeof(bool)]);
         }
