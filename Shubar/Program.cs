@@ -53,6 +53,8 @@ namespace Shubar
             var metricServer = new MetricServer(3799);
             metricServer.Start();
 
+            Console.WriteLine($"DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS={Environment.GetEnvironmentVariable("DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS")}");
+
             _clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             _clientSocket.Bind(new IPEndPoint(IPAddress.Any, 3478));
 
