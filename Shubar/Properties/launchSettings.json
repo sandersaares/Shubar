@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Shubar": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS": "1"
+      }
+    }
+  }
+}

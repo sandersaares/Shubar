@@ -63,7 +63,7 @@ namespace Shubar
                 var buffer = new byte[MaxPacketSizeBytes];
                 var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
 
-                Task.Run(async delegate
+                Helpers.Async.BackgroundThreadInvoke(async delegate
                 {
                     while (true)
                     {
@@ -93,6 +93,8 @@ namespace Shubar
 
         private static void StartSingleSocketPeerReads()
         {
+            Console.WriteLine("Using single-socket peer reads.");
+
             var peerSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             peerSocket.Bind(new IPEndPoint(IPAddress.Any, 3479));
 
@@ -103,7 +105,7 @@ namespace Shubar
                 var buffer = new byte[MaxPacketSizeBytes];
                 var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
 
-                Task.Run(async delegate
+                Helpers.Async.BackgroundThreadInvoke(async delegate
                 {
                     while (true)
                     {
@@ -123,6 +125,8 @@ namespace Shubar
         // Windows 2004+ only
         private static void StartMultiSocketPeerReads()
         {
+            Console.WriteLine("Using multi-socket peer reads.");
+
             for (ushort cpu = 0; cpu < Environment.ProcessorCount; cpu++)
             {
                 var peerSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
@@ -137,7 +141,7 @@ namespace Shubar
                     var buffer = new byte[MaxPacketSizeBytes];
                     var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
 
-                    Task.Run(async delegate
+                    Helpers.Async.BackgroundThreadInvoke(async delegate
                     {
                         while (true)
                         {
