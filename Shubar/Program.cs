@@ -65,7 +65,7 @@ namespace Shubar
                 var buffer = new byte[MaxPacketSizeBytes];
                 var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
 
-                Helpers.Async.BackgroundThreadInvoke(async delegate
+                Task.Run(async delegate
                 {
                     while (true)
                     {
@@ -74,7 +74,7 @@ namespace Shubar
                         if (result.ReceivedBytes == 0)
                             continue;
 
-                        PacketsReadFromClientPort.Inc();
+                        PacketsReadFromClientPort.Value.Inc();
 
                         ProcessPacketOnClientPort(new ArraySegment<byte>(buffer, 0, result.ReceivedBytes), (IPEndPoint)result.RemoteEndPoint);
                     }
@@ -107,7 +107,7 @@ namespace Shubar
                 var buffer = new byte[MaxPacketSizeBytes];
                 var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
 
-                Helpers.Async.BackgroundThreadInvoke(async delegate
+                Task.Run(async delegate
                 {
                     while (true)
                     {
@@ -116,7 +116,7 @@ namespace Shubar
                         if (result.ReceivedBytes == 0)
                             continue;
 
-                        PacketsReadFromPeerPort.Inc();
+                        PacketsReadFromPeerPort.Value.Inc();
 
                         await ProcessPacketOnPeerPortAsync(new ArraySegment<byte>(buffer, 0, result.ReceivedBytes));
                     }
@@ -143,7 +143,7 @@ namespace Shubar
                     var buffer = new byte[MaxPacketSizeBytes];
                     var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
 
-                    Helpers.Async.BackgroundThreadInvoke(async delegate
+                    Task.Run(async delegate
                     {
                         while (true)
                         {
@@ -152,7 +152,7 @@ namespace Shubar
                             if (result.ReceivedBytes == 0)
                                 continue;
 
-                            PacketsReadFromPeerPort.Inc();
+                            PacketsReadFromPeerPort.Value.Inc();
 
                             await ProcessPacketOnPeerPortAsync(new ArraySegment<byte>(buffer, 0, result.ReceivedBytes));
                         }
@@ -176,7 +176,7 @@ namespace Shubar
             _sessions.GetOrAdd(sessionId, CreateSession, remote);
         }
 
-        private static async Task ProcessPacketOnPeerPortAsync(ArraySegment<byte> packet)
+        private static async ValueTask ProcessPacketOnPeerPortAsync(ArraySegment<byte> packet)
         {
             // We expect the packet to start with a 64-bit integer, treated as the session ID.
             if (packet.Count < sizeof(long))
@@ -192,14 +192,32 @@ namespace Shubar
 
             // Forward packet to client.
             await _clientSocket.SendToAsync(packet, SocketFlags.None, session.ClientAddress);
-            PacketsWrittenToClientPort.Inc();
+            PacketsWrittenToClientPort.Value.Inc();
         }
 
-        private static readonly Counter PacketsReadFromClientPort = Metrics.CreateCounter("shubar_client_port_read_packets_total", "");
-        private static readonly Counter PacketsReadFromPeerPort = Metrics.CreateCounter("shubar_peer_port_read_packets_total", "");
 
-        private static readonly Counter PacketsWrittenToClientPort = Metrics.CreateCounter("shubar_client_port_written_packets_total", "");
-        private static readonly Counter PacketsWrittenToPeerPort = Metrics.CreateCounter("shubar_peer_port_written_packets_total", "");
+
+        private static readonly Counter PacketsReadFromClientPortBase = Metrics.CreateCounter("shubar_client_port_read_packets_total", "", new CounterConfiguration
+        {
+            LabelNames = new[] { "thread" }
+        });
+        private static readonly Counter PacketsReadFromPeerPortBase = Metrics.CreateCounter("shubar_peer_port_read_packets_total", "", new CounterConfiguration
+        {
+            LabelNames = new[] { "thread" }
+        });
+        private static readonly Counter PacketsWrittenToClientPortBase = Metrics.CreateCounter("shubar_client_port_written_packets_total", "", new CounterConfiguration
+        {
+            LabelNames = new[] { "thread" }
+        });
+
+        private static readonly ThreadLocal<Counter.Child> PacketsReadFromClientPort = new ThreadLocal<Counter.Child>(
+            () => PacketsReadFromClientPortBase.WithLabels(Thread.CurrentThread.ManagedThreadId.ToString()));
+
+        private static readonly ThreadLocal<Counter.Child> PacketsReadFromPeerPort = new ThreadLocal<Counter.Child>(
+            () => PacketsReadFromPeerPortBase.WithLabels(Thread.CurrentThread.ManagedThreadId.ToString()));
+
+        private static readonly ThreadLocal<Counter.Child> PacketsWrittenToClientPort = new ThreadLocal<Counter.Child>(
+            () => PacketsWrittenToClientPortBase.WithLabels(Thread.CurrentThread.ManagedThreadId.ToString()));
     }
 
     class Session
