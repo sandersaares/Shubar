@@ -63,13 +63,14 @@ namespace Shubar
             for (var i = 0; i < ConcurrentReadsFromClientPort; i++)
             {
                 var buffer = new byte[MaxPacketSizeBytes];
+                var bufferSegment = new ArraySegment<byte>(buffer);
                 var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
 
                 Task.Run(async delegate
                 {
                     while (true)
                     {
-                        var result = await _clientSocket.ReceiveFromAsync(buffer, SocketFlags.None, receivedFrom);
+                        var result = await _clientSocket.ReceiveFromAsync(bufferSegment, SocketFlags.None, receivedFrom);
 
                         if (result.ReceivedBytes == 0)
                             continue;
@@ -105,13 +106,14 @@ namespace Shubar
             for (var i = 0; i < ConcurrentReadsFromPeerPortTotal; i++)
             {
                 var buffer = new byte[MaxPacketSizeBytes];
+                var bufferSegment = new ArraySegment<byte>(buffer);
                 var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
 
                 Task.Run(async delegate
                 {
                     while (true)
                     {
-                        var result = await peerSocket.ReceiveFromAsync(buffer, SocketFlags.None, receivedFrom);
+                        var result = await peerSocket.ReceiveFromAsync(bufferSegment, SocketFlags.None, receivedFrom);
 
                         if (result.ReceivedBytes == 0)
                             continue;
@@ -141,13 +143,14 @@ namespace Shubar
                 for (var i = 0; i < ConcurrentReadsFromPeerPortPerCpu; i++)
                 {
                     var buffer = new byte[MaxPacketSizeBytes];
+                    var bufferSegment = new ArraySegment<byte>(buffer);
                     var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
 
                     Task.Run(async delegate
                     {
                         while (true)
                         {
-                            var result = await peerSocket.ReceiveFromAsync(buffer, SocketFlags.None, receivedFrom);
+                            var result = await peerSocket.ReceiveFromAsync(bufferSegment, SocketFlags.None, receivedFrom);
 
                             if (result.ReceivedBytes == 0)
                                 continue;
