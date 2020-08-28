@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 
 namespace Shubar
 {
-    // Based on Sven's urn app.
+    // Benchmark roughly based on https://github.com/svens/urn
     class Program
     {
         public const int MaxPacketSizeBytes = 2000;
@@ -81,11 +81,12 @@ namespace Shubar
                 }).Forget();
             }
 
+            /* TODO: Multi-socket doesn't really help unless you control what thread consumes from the IOCP.
             if (Helpers.Environment.IsMicrosoftOperatingSystem() && Environment.OSVersion.Version.Build == 19041)
             {
                 StartMultiSocketPeerReads();
             }
-            else
+            else*/
             {
                 StartSingleSocketPeerReads();
             }
