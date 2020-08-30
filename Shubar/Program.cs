@@ -4,6 +4,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -16,8 +17,6 @@ namespace Shubar
         public const int ConcurrentReadsFromClientPort = 1000;
         public static readonly int ConcurrentReadsFromPeerPortPerCpu = 1000;
         public static readonly int ConcurrentReadsFromPeerPortTotal = ConcurrentReadsFromPeerPortPerCpu * Environment.ProcessorCount;
-
-        private static Socket _clientSocket;
 
         private static void DisableUdpConnectionReset(Socket socket)
         {
@@ -35,6 +34,21 @@ namespace Shubar
             socket.IOControl(code, BitConverter.GetBytes(cpuIndex), new byte[sizeof(ushort)]);
         }
 
+        class Processor : ITurboPacketProcessor
+        {
+            public Processor(Action<Memory<byte>, uint, ushort> onReceivedPacket)
+            {
+                _onReceivedPacket = onReceivedPacket;
+            }
+
+            private readonly Action<Memory<byte>, uint, ushort> _onReceivedPacket;
+
+            public void ProcessPacket(Memory<byte> packet, uint fromAddress, ushort fromPort)
+            {
+                _onReceivedPacket(packet, fromAddress, fromPort);
+            }
+        }
+
         static void Main(string[] args)
         {
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
@@ -48,38 +62,28 @@ namespace Shubar
             };
 
             // Requires run as Administrator or suitable ACL configuration.
-            // netsh http add urlacl url=http://*:3799/metrics user=<your user account>
+            // netsh http add urlacl url=http://+:3799/metrics user=<your user account>
             // You may also need to allow in firewall for remote access.
             var metricServer = new MetricServer(3799);
             metricServer.Start();
 
             Console.WriteLine($"DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS={Environment.GetEnvironmentVariable("DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS")}");
 
-            _clientSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            _clientSocket.Bind(new IPEndPoint(IPAddress.Any, 3478));
-
-            DisableUdpConnectionReset(_clientSocket);
-
-            for (var i = 0; i < ConcurrentReadsFromClientPort; i++)
+            var clientPacketProcessor = new Processor(delegate (Memory<byte> packet, uint fromIp, ushort fromPort)
             {
-                var buffer = new byte[MaxPacketSizeBytes];
-                var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
+                PacketsReadFromClientPort.Value.Inc();
 
-                Task.Run(async delegate
-                {
-                    while (true)
-                    {
-                        var result = await _clientSocket.ReceiveFromAsync(buffer, SocketFlags.None, receivedFrom);
+                // We expect the packet to start with a 64-bit integer, treated as the session ID.
+                if (packet.Length < sizeof(long))
+                    return; // Don't know what that was and don't want to know!
 
-                        if (result.ReceivedBytes == 0)
-                            continue;
+                long sessionId = BitConverter.ToInt64(packet.Span);
 
-                        PacketsReadFromClientPort.Value.Inc();
+                Session CreateSession(long id, EndPointTuple arg) => new Session(arg);
 
-                        ProcessPacketOnClientPort(new ArraySegment<byte>(buffer, 0, result.ReceivedBytes), (IPEndPoint)result.RemoteEndPoint);
-                    }
-                }).Forget();
-            }
+                _sessions.GetOrAdd(sessionId, CreateSession, new EndPointTuple { Address = fromIp, Port = fromPort });
+            });
+            var clientSocket = new TurboSocket(clientPacketProcessor, 3478);
 
             /* TODO: Multi-socket doesn't really help unless you control what thread consumes from the IOCP.
             if (Helpers.Environment.IsMicrosoftOperatingSystem() && Environment.OSVersion.Version.Build == 19041)
@@ -98,105 +102,41 @@ namespace Shubar
         {
             Console.WriteLine("Using single-socket peer reads.");
 
-            var peerSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            peerSocket.Bind(new IPEndPoint(IPAddress.Any, 3479));
+            TurboSocket peerSocket = null;
 
-            DisableUdpConnectionReset(peerSocket);
-
-            for (var i = 0; i < ConcurrentReadsFromPeerPortTotal; i++)
+            var peerPacketProcessor = new Processor(delegate (Memory<byte> packet, uint fromIp, ushort fromPort)
             {
-                var buffer = new byte[MaxPacketSizeBytes];
-                var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
+                PacketsReadFromPeerPort.Value.Inc();
 
-                Task.Run(async delegate
+                // We expect the packet to start with a 64-bit integer, treated as the session ID.
+                if (packet.Length< sizeof(long))
+                    return; // Don't know what that was and don't want to know!
+
+                long sessionId = BitConverter.ToInt64(packet.Span);
+
+                if (!_sessions.TryGetValue(sessionId, out var session))
                 {
-                    while (true)
-                    {
-                        var result = await peerSocket.ReceiveFromAsync(buffer, SocketFlags.None, receivedFrom);
-
-                        if (result.ReceivedBytes == 0)
-                            continue;
-
-                        PacketsReadFromPeerPort.Value.Inc();
-
-                        await ProcessPacketOnPeerPortAsync(new ArraySegment<byte>(buffer, 0, result.ReceivedBytes));
-                    }
-                }).Forget();
-            }
-        }
-
-        // Windows 2004+ only
-        private static void StartMultiSocketPeerReads()
-        {
-            Console.WriteLine("Using multi-socket peer reads.");
-
-            for (ushort cpu = 0; cpu < Environment.ProcessorCount; cpu++)
-            {
-                var peerSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-
-                DisableUdpConnectionReset(peerSocket);
-                EnableSocketSharingPerCore(peerSocket, cpu);
-
-                peerSocket.Bind(new IPEndPoint(IPAddress.Any, 3479));
-
-                for (var i = 0; i < ConcurrentReadsFromPeerPortPerCpu; i++)
-                {
-                    var buffer = new byte[MaxPacketSizeBytes];
-                    var receivedFrom = new IPEndPoint(IPAddress.Any, 0);
-
-                    Task.Run(async delegate
-                    {
-                        while (true)
-                        {
-                            var result = await peerSocket.ReceiveFromAsync(buffer, SocketFlags.None, receivedFrom);
-
-                            if (result.ReceivedBytes == 0)
-                                continue;
-
-                            PacketsReadFromPeerPort.Value.Inc();
-
-                            await ProcessPacketOnPeerPortAsync(new ArraySegment<byte>(buffer, 0, result.ReceivedBytes));
-                        }
-                    }).Forget();
+                    // There is no such session. Ignore packet.
+                    return;
                 }
-            }
+
+                // Forward packet to client.
+                var buffer = peerSocket.BeginWrite();
+                buffer.DataLength = packet.Length;
+                packet.CopyTo(buffer.Data);
+
+                buffer.IpAddress = session.ClientAddress.Address;
+                buffer.Port = session.ClientAddress.Port;
+
+                buffer.Write();
+                
+                PacketsWrittenToClientPort.Value.Inc();
+            });
+
+            peerSocket = new TurboSocket(peerPacketProcessor, 3479);
         }
 
         private static ConcurrentDictionary<long, Session> _sessions = new ConcurrentDictionary<long, Session>();
-
-        private static void ProcessPacketOnClientPort(ArraySegment<byte> packet, IPEndPoint remote)
-        {
-            // We expect the packet to start with a 64-bit integer, treated as the session ID.
-            if (packet.Count < sizeof(long))
-                return; // Don't know what that was and don't want to know!
-
-            long sessionId = BitConverter.ToInt64(packet);
-
-            Session CreateSession(long id, IPEndPoint arg) => new Session(arg);
-
-            _sessions.GetOrAdd(sessionId, CreateSession, remote);
-        }
-
-        private static async ValueTask ProcessPacketOnPeerPortAsync(ArraySegment<byte> packet)
-        {
-            // We expect the packet to start with a 64-bit integer, treated as the session ID.
-            if (packet.Count < sizeof(long))
-                return; // Don't know what that was and don't want to know!
-
-            long sessionId = BitConverter.ToInt64(packet);
-
-            if (!_sessions.TryGetValue(sessionId, out var session))
-            {
-                // There is no such session. Ignore packet.
-                return;
-            }
-
-            // Forward packet to client.
-            await _clientSocket.SendToAsync(packet, SocketFlags.None, session.ClientAddress);
-            PacketsWrittenToClientPort.Value.Inc();
-        }
-
-
 
         private static readonly Counter PacketsReadFromClientPortBase = Metrics.CreateCounter("shubar_client_port_read_packets_total", "", new CounterConfiguration
         {
@@ -223,9 +163,9 @@ namespace Shubar
 
     class Session
     {
-        public IPEndPoint ClientAddress { get; }
+        public EndPointTuple ClientAddress { get; }
 
-        public Session(IPEndPoint clientAddress)
+        public Session(EndPointTuple clientAddress)
         {
             ClientAddress = clientAddress;
         }
