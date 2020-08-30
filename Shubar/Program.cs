@@ -13,27 +13,6 @@ namespace Shubar
     // Benchmark roughly based on https://github.com/svens/urn
     class Program
     {
-        public const int MaxPacketSizeBytes = 2000;
-        public const int ConcurrentReadsFromClientPort = 1000;
-        public static readonly int ConcurrentReadsFromPeerPortPerCpu = 1000;
-        public static readonly int ConcurrentReadsFromPeerPortTotal = ConcurrentReadsFromPeerPortPerCpu * Environment.ProcessorCount;
-
-        private static void DisableUdpConnectionReset(Socket socket)
-        {
-            if (Helpers.Environment.IsNonMicrosoftOperatingSystem())
-                return; // This stuff only works on Windows.
-
-            const int code = unchecked((int)(0x80000000 | 0x18000000 | 12));
-            socket.IOControl(code, BitConverter.GetBytes(false), new byte[sizeof(bool)]);
-        }
-
-        private static void EnableSocketSharingPerCore(Socket socket, ushort cpuIndex)
-        {
-            // SIO_SET_PORT_SHARING_PER_PROC_SOCKET
-            const int code = unchecked((int)(0x80000000 | 0x18000000 | 21));
-            socket.IOControl(code, BitConverter.GetBytes(cpuIndex), new byte[sizeof(ushort)]);
-        }
-
         class Processor : ITurboPacketProcessor
         {
             public Processor(Action<Memory<byte>, uint, ushort> onReceivedPacket)
@@ -85,55 +64,50 @@ namespace Shubar
             });
             var clientSocket = new TurboSocket(clientPacketProcessor, 3478);
 
-            /* TODO: Multi-socket doesn't really help unless you control what thread consumes from the IOCP.
-            if (Helpers.Environment.IsMicrosoftOperatingSystem() && Environment.OSVersion.Version.Build == 19041)
-            {
-                StartMultiSocketPeerReads();
-            }
-            else*/
-            {
-                StartSingleSocketPeerReads();
-            }
+            StartPeerReads();
 
             Thread.Sleep(Timeout.Infinite);
         }
 
-        private static void StartSingleSocketPeerReads()
+        private static void StartPeerReads()
         {
-            Console.WriteLine("Using single-socket peer reads.");
+            Console.WriteLine("Using core-bound multi-socket peer reads.");
 
-            TurboSocket peerSocket = null;
-
-            var peerPacketProcessor = new Processor(delegate (Memory<byte> packet, uint fromIp, ushort fromPort)
+            for (ushort cpu = 0; cpu < Environment.ProcessorCount; cpu++)
             {
-                PacketsReadFromPeerPort.Value.Inc();
+                TurboSocket peerSocket = null;
 
-                // We expect the packet to start with a 64-bit integer, treated as the session ID.
-                if (packet.Length< sizeof(long))
-                    return; // Don't know what that was and don't want to know!
-
-                long sessionId = BitConverter.ToInt64(packet.Span);
-
-                if (!_sessions.TryGetValue(sessionId, out var session))
+                var peerPacketProcessor = new Processor(delegate (Memory<byte> packet, uint fromIp, ushort fromPort)
                 {
-                    // There is no such session. Ignore packet.
-                    return;
-                }
+                    PacketsReadFromPeerPort.Value.Inc();
 
-                // Forward packet to client.
-                var buffer = peerSocket.BeginWrite();
-                buffer.DataLength = packet.Length;
-                packet.CopyTo(buffer.Data);
+                    // We expect the packet to start with a 64-bit integer, treated as the session ID.
+                    if (packet.Length < sizeof(long))
+                        return; // Don't know what that was and don't want to know!
 
-                buffer.IpAddress = session.ClientAddress.Address;
-                buffer.Port = session.ClientAddress.Port;
+                    long sessionId = BitConverter.ToInt64(packet.Span);
 
-                buffer.Write();
-                
-                PacketsWrittenToClientPort.Value.Inc();
-            });
+                    if (!_sessions.TryGetValue(sessionId, out var session))
+                    {
+                        // There is no such session. Ignore packet.
+                        return;
+                    }
 
-            peerSocket = new TurboSocket(peerPacketProcessor, 3479);
+                    // Forward packet to client.
+                    var buffer = peerSocket.BeginWrite();
+                    buffer.DataLength = packet.Length;
+                    packet.CopyTo(buffer.Data);
+
+                    buffer.IpAddress = session.ClientAddress.Address;
+                    buffer.Port = session.ClientAddress.Port;
+
+                    buffer.Write();
+
+                    PacketsWrittenToClientPort.Value.Inc();
+                });
+
+                peerSocket = new TurboSocket(peerPacketProcessor, 3479, cpu);
+            }
         }
 
         private static ConcurrentDictionary<long, Session> _sessions = new ConcurrentDictionary<long, Session>();
