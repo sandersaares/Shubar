@@ -14,11 +14,26 @@ namespace Shubar
 
             for (var i = 0; i < BufferCount; i++)
             {
-                _availableReadBuffers.Add(new Buffer());
-                _availableWriteBuffers.Add(new Buffer(FinishWrite));
+                _readBuffers[i] = new Buffer(i);
+                _writeBuffers[i] = new Buffer(i, FinishWrite);
+
+                _readOverlapped[i] = new NativeWindows.NativeOverlapped
+                {
+                    BufferIndex = i
+                };
+                _writeOverlapped[i] = new NativeWindows.NativeOverlapped
+                {
+                    BufferIndex = i,
+                    IsWrite = true
+                };
+
+                _availableReadBuffers.Add(_readBuffers[i]);
+                _availableWriteBuffers.Add(_writeBuffers[i]);
             }
 
             _socketHandle = NativeWindows.WSASocketW(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp, IntPtr.Zero, 0, NativeWindows.SocketConstructorFlags.WSA_FLAG_OVERLAPPED);
+
+            _completionPortHandle = NativeWindows.CreateIoCompletionPort(_socketHandle, IntPtr.Zero, IntPtr.Zero, 0);
 
             DisableUdpConnectionReset();
 
@@ -27,8 +42,7 @@ namespace Shubar
 
             MustSucceed(NativeWindows.bind(_socketHandle, bindTo.DataPtr, bindTo.Data.Length), nameof(NativeWindows.bind));
 
-            new Thread(ReadThread).Start();
-            new Thread(ConsumeThread).Start();
+            new Thread(CompletionThread).Start();
             new Thread(WriteThread).Start();
         }
 
@@ -67,7 +81,14 @@ namespace Shubar
         }
 
         private IntPtr _socketHandle;
+        private IntPtr _completionPortHandle;
+
         private ITurboPacketProcessor _processor;
+
+        private readonly Buffer[] _readBuffers = new Buffer[BufferCount];
+        private readonly Buffer[] _writeBuffers = new Buffer[BufferCount];
+        private readonly NativeWindows.NativeOverlapped[] _readOverlapped = new NativeWindows.NativeOverlapped[BufferCount];
+        private readonly NativeWindows.NativeOverlapped[] _writeOverlapped = new NativeWindows.NativeOverlapped[BufferCount];
 
         // TODO: Use unmanaged memory instead, this is a gruesome abuse of the managed heap.
         /// <summary>
@@ -77,6 +98,8 @@ namespace Shubar
         private sealed class Buffer : IDisposable, ITurboWriteBuffer
         {
             public const int MaxLength = 1500;
+
+            public int Index { get; }
 
             public byte[] Data { get; }
             public int DataLength { get; set; }
@@ -100,8 +123,9 @@ namespace Shubar
                 Callback(this);
             }
 
-            public Buffer(Action<Buffer> callback = null)
+            public Buffer(int index, Action<Buffer> callback = null)
             {
+                Index = index;
                 Data = new byte[MaxLength];
 
                 Callback = callback;
@@ -122,62 +146,6 @@ namespace Shubar
         private const int BufferCount = 32 * 1024;
 
         private readonly ConcurrentBag<Buffer> _availableReadBuffers = new ConcurrentBag<Buffer>();
-        private readonly ConcurrentQueue<Buffer> _completedReads = new ConcurrentQueue<Buffer>();
-
-        private void ReadThread()
-        {
-            int addrSize = Sockaddr.Size;
-
-            while (true)
-            {
-                if (!_availableReadBuffers.TryTake(out var buffer))
-                {
-                    Console.WriteLine("Out of read buffers.");
-                    continue; // Whatever, try again.
-                }
-
-                var bytesRead = NativeWindows.recvfrom(_socketHandle, buffer.DataPtr, Buffer.MaxLength, SocketFlags.None, buffer.AddrPtr, ref addrSize);
-
-                if (bytesRead == 0)
-                {
-                    Console.WriteLine("Read thread finished - recvfrom() returned 0.");
-                    break;
-                }
-                else if (bytesRead < 0)
-                {
-                    Console.WriteLine($"Read thread error - recvfrom() returned {bytesRead} ({Marshal.GetLastWin32Error()}).");
-                    continue;
-                }
-
-                buffer.DataLength = bytesRead;
-
-                _completedReads.Enqueue(buffer);
-            }
-        }
-
-        private void ConsumeThread()
-        {
-            while (true)
-            {
-                if (!_completedReads.TryDequeue(out var buffer))
-                {
-                    Thread.Yield();
-                    continue;
-                }
-
-                try
-                {
-                    _processor.ProcessPacket(buffer.Data.AsMemory(0, buffer.DataLength), buffer.IpAddress, buffer.Port);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Failed to process packet: {ex.Message}");
-                }
-
-                // Return the buffer.
-                _availableReadBuffers.Add(buffer);
-            }
-        }
 
         // TODO: We would benefit from a zero-copy "re-send" mechanism.
 
@@ -227,6 +195,105 @@ namespace Shubar
 
                 _availableWriteBuffers.Add(buffer);
             }
+        }
+
+        private const int QueuedReadCount = 1;
+
+        private void CompletionThread()
+        {
+            // Queue up some reads.
+            for (var i = 0; i < QueuedReadCount; i++)
+            {
+                QueueRead();
+            }
+
+            uint completionsCount = 128;
+            var completions = stackalloc NativeWindows.OverlappedEntry[128];
+
+            while (true)
+            {
+                var result = NativeWindows.GetQueuedCompletionStatusEx(_completionPortHandle, new IntPtr(completions), completionsCount, out var entriesReceived, Timeout.Infinite, false);
+
+                for (var i = 0; i < entriesReceived; i++)
+                {
+                    var completion = completions[i];
+
+                    // TODO: Check packet length properly.
+
+                    if (completion.Overlapped.IsWrite)
+                    {
+                        var buffer = _writeBuffers[completion.Overlapped.BufferIndex];
+                        ProcessCompletedWrite(buffer);
+                    }
+                    else
+                    {
+                        var buffer = _readBuffers[completion.Overlapped.BufferIndex];
+                        buffer.DataLength = (int)completion.NumberOfBytesTransferred;
+                        ProcessCompletedRead(buffer);
+                    }
+                }
+            }
+        }
+
+        const int WSA_IO_PENDING = 997;
+
+        // This is accessed for... reasons. Just don't keep it on the stack.
+        private static int SockaddrSize = Sockaddr.Size;
+
+        private void QueueRead()
+        {
+            if (!_availableReadBuffers.TryTake(out var buffer))
+            {
+                // Should never happen, as we only queue a read when a previous read is completed.
+                throw new Exception($"Out of read buffers {DateTimeOffset.UtcNow}.");
+            }
+
+            var wsaBuffer = new NativeWindows.WSABuffer
+            {
+                Length = buffer.DataLength,
+                Pointer = buffer.DataPtr
+            };
+
+            SocketFlags flags = SocketFlags.None;
+            // TODO: Documentation is ambiguous - can we really pass null for "number of bytes read"? Doesn't that lead to immediate completion being ignored? Or is completion scheduled regardless, even for immediate?
+            var result = NativeWindows.WSARecvFrom(_socketHandle, &wsaBuffer, 1, IntPtr.Zero, ref flags, buffer.AddrPtr, ref SockaddrSize, Marshal.UnsafeAddrOfPinnedArrayElement(_readOverlapped, buffer.Index), IntPtr.Zero);
+
+            if (result == SocketError.Success)
+            {
+                // Immediate success.
+                // TODO: Investigate correct handling of this.
+            }
+            else if (result == SocketError.IOPending || Marshal.GetLastWin32Error() == WSA_IO_PENDING)
+            {
+                return; // Delayed success.
+            }
+            else
+            {
+                Console.WriteLine($"WSARecvFrom returned {result}; last error: {Marshal.GetLastWin32Error()}");
+            }
+        }
+
+        private void ProcessCompletedRead(Buffer buffer)
+        {
+            try
+            {
+                _processor.ProcessPacket(buffer.Data.AsMemory(0, buffer.DataLength), buffer.IpAddress, buffer.Port);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to process packet: {ex.Message}");
+            }
+
+            // Return the buffer.
+            _availableReadBuffers.Add(buffer);
+
+            QueueRead();
+        }
+
+
+        private void ProcessCompletedWrite(Buffer buffer)
+        {
+            _availableWriteBuffers.Add(buffer);
         }
 
         private static void MustSucceed(SocketError result, string name)

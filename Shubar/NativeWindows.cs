@@ -137,5 +137,63 @@ namespace Shubar
     [In] int cmd,
     [In, Out] ref int argp);
 
+        [DllImport(Libraries.Ws2_32, SetLastError = true)]
+        internal static extern unsafe SocketError WSARecvFrom(
+            IntPtr socketHandle,
+            WSABuffer* buffers,
+            int bufferCount,
+            IntPtr bytesTransferred,
+            ref SocketFlags socketFlags,
+            IntPtr socketAddressPointer,
+            ref int socketAddressSizePointer,
+            IntPtr overlapped,
+            IntPtr completionRoutine);
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct WSABuffer
+        {
+            internal int Length; // Length of Buffer
+            internal IntPtr Pointer; // Pointer to Buffer
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct NativeOverlapped
+        {
+            public IntPtr InternalLow;
+            public IntPtr InternalHigh;
+            public int OffsetLow;
+            public int OffsetHigh;
+            public IntPtr EventHandle;
+
+            // We keep track of all our buffers. This is the route to determine the right managed buffer instance.
+            public int BufferIndex;
+            // We have separate read and write buffers.
+            public bool IsWrite;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct OverlappedEntry
+        {
+            public IntPtr CompletionKey;
+            public NativeOverlapped Overlapped;
+            public IntPtr Internal;
+            public uint NumberOfBytesTransferred;
+        }
+
+        [DllImport(Libraries.Kernel32, SetLastError = true)]
+        internal static extern IntPtr CreateIoCompletionPort(IntPtr FileHandle, IntPtr ExistingCompletionPort, IntPtr CompletionKey, int NumberOfConcurrentThreads);
+
+        [DllImport(Libraries.Kernel32, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool PostQueuedCompletionStatus(IntPtr CompletionPort, int dwNumberOfBytesTransferred, UIntPtr CompletionKey, IntPtr lpOverlapped);
+
+        [DllImport(Libraries.Kernel32, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetQueuedCompletionStatus(IntPtr CompletionPort, out int lpNumberOfBytes, out UIntPtr CompletionKey, out IntPtr lpOverlapped, int dwMilliseconds);
+
+        [DllImport(Libraries.Kernel32, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static unsafe extern bool GetQueuedCompletionStatusEx(IntPtr CompletionPort, IntPtr lpCompletionPortEntries, uint count, out uint ulEntriesRemoved, int dwMilliseconds, bool alertable);
+
     }
 }
