@@ -119,7 +119,7 @@ namespace Shubar
         }
 
         // Both read & write
-        private const int BufferCount = 4096;
+        private const int BufferCount = 32 * 1024;
 
         private readonly ConcurrentBag<Buffer> _availableReadBuffers = new ConcurrentBag<Buffer>();
         private readonly ConcurrentQueue<Buffer> _completedReads = new ConcurrentQueue<Buffer>();
