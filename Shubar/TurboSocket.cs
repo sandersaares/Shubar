@@ -212,7 +212,7 @@ namespace Shubar
             }
         }
 
-        private const int QueuedReadCount = 1;
+        private const int QueuedReadCount = 2000;
 
         private void CompletionThread()
         {
