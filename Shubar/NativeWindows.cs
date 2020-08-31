@@ -140,7 +140,7 @@ namespace Shubar
         [DllImport(Libraries.Ws2_32, SetLastError = true)]
         internal static extern unsafe SocketError WSARecvFrom(
             IntPtr socketHandle,
-            WSABuffer* buffers,
+            IntPtr buffers,
             int bufferCount,
             IntPtr bytesTransferred,
             ref SocketFlags socketFlags,
@@ -157,9 +157,12 @@ namespace Shubar
         }
 
         [StructLayout(LayoutKind.Sequential)]
-        public struct NativeOverlapped
+        internal struct NativeOverlapped
         {
+            /* The status code for the I/O request. When the request is issued, the system sets this member to STATUS_PENDING to indicate that the operation has not yet started.
+             * When the request is completed, the system sets this member to the status code for the completed request.*/
             public IntPtr InternalLow;
+            // The number of bytes transferred for the I/O request. The system sets this member if the request is completed without errors.
             public IntPtr InternalHigh;
             public int OffsetLow;
             public int OffsetHigh;
@@ -168,14 +171,20 @@ namespace Shubar
             // We keep track of all our buffers. This is the route to determine the right managed buffer instance.
             public int BufferIndex;
             // We have separate read and write buffers.
-            public bool IsWrite;
+            public int IsWrite;
+
+            // TEST @ 40
+            public int BytesTransferred;
+
+            // TEST 2 @ 48
+            public WSABuffer WsaBuf;
         }
 
         [StructLayout(LayoutKind.Sequential)]
-        public struct OverlappedEntry
+        internal unsafe struct OverlappedEntry
         {
             public IntPtr CompletionKey;
-            public NativeOverlapped Overlapped;
+            public NativeOverlapped* Overlapped;
             public IntPtr Internal;
             public uint NumberOfBytesTransferred;
         }

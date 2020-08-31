@@ -12,6 +12,9 @@ namespace Shubar
         {
             _processor = processor;
 
+            _readOverlappedHandle = GCHandle.Alloc(_readOverlapped, GCHandleType.Pinned);
+            _writeOverlappedHandle = GCHandle.Alloc(_writeOverlapped, GCHandleType.Pinned);
+
             for (var i = 0; i < BufferCount; i++)
             {
                 _readBuffers[i] = new Buffer(i);
@@ -19,12 +22,22 @@ namespace Shubar
 
                 _readOverlapped[i] = new NativeWindows.NativeOverlapped
                 {
-                    BufferIndex = i
+                    BufferIndex = i,
+                    WsaBuf = new NativeWindows.WSABuffer
+                    {
+                        Pointer = _readBuffers[i].DataPtr,
+                        Length = _readBuffers[i].Data.Length
+                    }
                 };
                 _writeOverlapped[i] = new NativeWindows.NativeOverlapped
                 {
                     BufferIndex = i,
-                    IsWrite = true
+                    IsWrite = 1,
+                    WsaBuf = new NativeWindows.WSABuffer
+                    {
+                        Pointer = _writeBuffers[i].DataPtr,
+                        Length = _writeBuffers[i].Data.Length
+                    }
                 };
 
                 _availableReadBuffers.Add(_readBuffers[i]);
@@ -89,6 +102,8 @@ namespace Shubar
         private readonly Buffer[] _writeBuffers = new Buffer[BufferCount];
         private readonly NativeWindows.NativeOverlapped[] _readOverlapped = new NativeWindows.NativeOverlapped[BufferCount];
         private readonly NativeWindows.NativeOverlapped[] _writeOverlapped = new NativeWindows.NativeOverlapped[BufferCount];
+        private readonly GCHandle _readOverlappedHandle;
+        private readonly GCHandle _writeOverlappedHandle;
 
         // TODO: Use unmanaged memory instead, this is a gruesome abuse of the managed heap.
         /// <summary>
@@ -97,7 +112,7 @@ namespace Shubar
         /// </summary>
         private sealed class Buffer : IDisposable, ITurboWriteBuffer
         {
-            public const int MaxLength = 1500;
+            public const int MaxLength = 2000;
 
             public int Index { get; }
 
@@ -220,14 +235,14 @@ namespace Shubar
 
                     // TODO: Check packet length properly.
 
-                    if (completion.Overlapped.IsWrite)
+                    if (completion.Overlapped->IsWrite != 0)
                     {
-                        var buffer = _writeBuffers[completion.Overlapped.BufferIndex];
+                        var buffer = _writeBuffers[completion.Overlapped->BufferIndex];
                         ProcessCompletedWrite(buffer);
                     }
                     else
                     {
-                        var buffer = _readBuffers[completion.Overlapped.BufferIndex];
+                        var buffer = _readBuffers[completion.Overlapped->BufferIndex];
                         buffer.DataLength = (int)completion.NumberOfBytesTransferred;
                         ProcessCompletedRead(buffer);
                     }
@@ -248,15 +263,16 @@ namespace Shubar
                 throw new Exception($"Out of read buffers {DateTimeOffset.UtcNow}.");
             }
 
-            var wsaBuffer = new NativeWindows.WSABuffer
+            /*var wsaBuffer = new NativeWindows.WSABuffer
             {
                 Length = buffer.DataLength,
                 Pointer = buffer.DataPtr
-            };
+            };*/
 
             SocketFlags flags = SocketFlags.None;
+            var overlapped = Marshal.UnsafeAddrOfPinnedArrayElement(_readOverlapped, buffer.Index);
             // TODO: Documentation is ambiguous - can we really pass null for "number of bytes read"? Doesn't that lead to immediate completion being ignored? Or is completion scheduled regardless, even for immediate?
-            var result = NativeWindows.WSARecvFrom(_socketHandle, &wsaBuffer, 1, IntPtr.Zero, ref flags, buffer.AddrPtr, ref SockaddrSize, Marshal.UnsafeAddrOfPinnedArrayElement(_readOverlapped, buffer.Index), IntPtr.Zero);
+            var result = NativeWindows.WSARecvFrom(_socketHandle, IntPtr.Add(overlapped, 48), 1, IntPtr.Add(overlapped, 40), ref flags, buffer.AddrPtr, ref SockaddrSize, overlapped, IntPtr.Zero);
 
             if (result == SocketError.Success)
             {
