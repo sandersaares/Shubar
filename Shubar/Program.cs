@@ -100,40 +100,44 @@ namespace Shubar
 
         private static void StartSingleSocketPeerReads()
         {
-            Console.WriteLine("Using single-socket peer reads.");
+            Console.WriteLine("Using core-bound multi-socket peer reads.");
 
-            TurboSocket peerSocket = null;
-
-            var peerPacketProcessor = new Processor(delegate (Memory<byte> packet, uint fromIp, ushort fromPort)
+            for (ushort cpu = 0; cpu < Environment.ProcessorCount; cpu++)
             {
-                PacketsReadFromPeerPort.Value.Inc();
 
-                // We expect the packet to start with a 64-bit integer, treated as the session ID.
-                if (packet.Length< sizeof(long))
-                    return; // Don't know what that was and don't want to know!
+                TurboSocket peerSocket = null;
 
-                long sessionId = BitConverter.ToInt64(packet.Span);
-
-                if (!_sessions.TryGetValue(sessionId, out var session))
+                var peerPacketProcessor = new Processor(delegate (Memory<byte> packet, uint fromIp, ushort fromPort)
                 {
-                    // There is no such session. Ignore packet.
-                    return;
-                }
+                    PacketsReadFromPeerPort.Value.Inc();
 
-                // Forward packet to client.
-                var buffer = peerSocket.BeginWrite();
-                buffer.DataLength = packet.Length;
-                packet.CopyTo(buffer.Data);
+                    // We expect the packet to start with a 64-bit integer, treated as the session ID.
+                    if (packet.Length < sizeof(long))
+                        return; // Don't know what that was and don't want to know!
 
-                buffer.IpAddress = session.ClientAddress.Address;
-                buffer.Port = session.ClientAddress.Port;
+                    long sessionId = BitConverter.ToInt64(packet.Span);
 
-                buffer.Write();
-                
-                PacketsWrittenToClientPort.Value.Inc();
-            });
+                    if (!_sessions.TryGetValue(sessionId, out var session))
+                    {
+                        // There is no such session. Ignore packet.
+                        return;
+                    }
 
-            peerSocket = new TurboSocket(peerPacketProcessor, 3479);
+                    // Forward packet to client.
+                    var buffer = peerSocket.BeginWrite();
+                    buffer.DataLength = packet.Length;
+                    packet.CopyTo(buffer.Data);
+
+                    buffer.IpAddress = session.ClientAddress.Address;
+                    buffer.Port = session.ClientAddress.Port;
+
+                    buffer.Write();
+
+                    PacketsWrittenToClientPort.Value.Inc();
+                });
+
+                peerSocket = new TurboSocket(peerPacketProcessor, 3479, cpu);
+            }
         }
 
         private static ConcurrentDictionary<long, Session> _sessions = new ConcurrentDictionary<long, Session>();

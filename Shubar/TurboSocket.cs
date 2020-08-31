@@ -8,7 +8,7 @@ namespace Shubar
 {
     public sealed unsafe class TurboSocket : IDisposable
     {
-        public TurboSocket(ITurboPacketProcessor processor, ushort bindToPort)
+        public TurboSocket(ITurboPacketProcessor processor, ushort bindToPort, ushort? cpu = null)
         {
             _processor = processor;
 
@@ -45,6 +45,11 @@ namespace Shubar
             }
 
             _socketHandle = NativeWindows.WSASocketW(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp, IntPtr.Zero, 0, NativeWindows.SocketConstructorFlags.WSA_FLAG_OVERLAPPED);
+
+            _cpu = cpu;
+
+            if (cpu.HasValue)
+                BindToCpu(cpu.Value);
 
             _completionPortHandle = NativeWindows.CreateIoCompletionPort(_socketHandle, IntPtr.Zero, IntPtr.Zero, 0);
 
@@ -93,8 +98,20 @@ namespace Shubar
             MustSucceed(NativeWindows.ioctlsocket(_socketHandle, code, ref value), nameof(NativeWindows.ioctlsocket));
         }
 
+        private void BindToCpu(ushort cpu)
+        {
+            // SIO_SET_PORT_SHARING_PER_PROC_SOCKET
+            const int code = unchecked((int)(0x80000000 | 0x18000000 | 21));
+
+            int value = cpu;
+
+            MustSucceed(NativeWindows.ioctlsocket(_socketHandle, code, ref value), nameof(NativeWindows.ioctlsocket));
+        }
+
         private IntPtr _socketHandle;
         private IntPtr _completionPortHandle;
+
+        private readonly ushort? _cpu;
 
         private ITurboPacketProcessor _processor;
 
